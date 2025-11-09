@@ -6,11 +6,12 @@ This is a **framework-agnostic** static site deployment toolkit for Google Cloud
 
 ## Architecture
 
-The toolkit consists of three main scripts:
+The toolkit consists of two main scripts:
 
 1. **deploy-staging.sh** - Deploys to staging environment with shorter cache times
 2. **deploy-production.sh** - Deploys to production with longer cache times and safety confirmations
-3. **rollback.sh** - Instant zero-copy rollback between versions
+
+Rollback is done manually via the GCP Console Load Balancer UI (update path rewrite).
 
 ### Key Features
 
@@ -175,18 +176,20 @@ npm run build
 
 ### Rollback to Previous Version
 
+Rollback is manual via GCP Console:
+
 ```bash
-# Interactive rollback
-./rollback.sh
-
 # List available releases
-./rollback.sh list staging
-./rollback.sh list production
+gsutil ls gs://BUCKET_NAME/releases/
 
-# Rollback to specific version
-./rollback.sh 20251108-143022-abc123 staging
-./rollback.sh 20251108-143022-abc123 production
+# Then manually update Load Balancer:
+# 1. Go to Load Balancing in GCP Console
+# 2. Edit your load balancer
+# 3. Update path rewrite to old version: /releases/v1.0.0
+# 4. Save
 ```
+
+Rollback is instant - just changes routing, no file copying needed.
 
 ## Load Balancer Setup
 
@@ -221,13 +224,14 @@ DEPLOY_PATH_MATCHER_NAME=path-matcher-1
 deploysite-cloudbucket/
 ├── deploy-production.sh      # Production deployment script
 ├── deploy-staging.sh          # Staging deployment script
-├── rollback.sh                # Rollback utility
 ├── README.md                  # User documentation
 ├── CLAUDE.md                  # This file (Claude Code reference)
 ├── .gitignore                 # Git ignore rules
 ├── .env.staging               # Staging config (gitignored)
 ├── .env.production            # Production config (gitignored)
-└── .env.example               # Example configuration template
+├── .env.staging.example       # Staging config template
+├── .env.production.example    # Production config template
+└── .env.example               # Generic config template
 ```
 
 ## Security Notes

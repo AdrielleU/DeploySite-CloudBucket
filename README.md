@@ -1,592 +1,520 @@
-# GCP Deployment Scripts
+# GCP Static Site Deployment Toolkit
 
-**Framework-Agnostic** static site deployment scripts for Google Cloud Platform.
+**Simple, lightweight deployment scripts for static web apps on Google Cloud Storage.**
 
-Works with **any** static site generator or framework:
-- ✅ React (Vite, CRA, Next.js static export)
-- ✅ Vue (Vite, Vue CLI, Nuxt static)
-- ✅ Angular
-- ✅ Svelte/SvelteKit
-- ✅ Hugo, Jekyll, 11ty
-- ✅ Plain HTML/CSS/JS
-- ✅ Any framework that outputs static files
+## Purpose
 
-**Features:**
-- 🚀 Deploy pre-built static files to versioned GCS releases
-- 📦 Automatic gzip compression for optimal delivery
-- 🔄 Instant zero-copy rollback between versions
-- ⚡ Optional load balancer auto-update
-- 🎯 Interactive prompts OR fully automated via .env
-- 🛠️ CLI arguments for flexible workflows
+This toolkit is designed for **manual deployments** and **early-stage projects** before setting up full CI/CD pipelines. It's perfect for:
+- Quick deployments during development
+- Testing production configurations before automating
+- Small teams that don't need complex CI/CD yet
+- Learning GCP deployment patterns before enterprise setup
+
+**Zero overhead** - just bash scripts that upload your static files to GCS with versioning. No Docker, no build servers, no complicated setup.
+
+## What It Does
+
+1. Takes your **pre-built static files** (HTML, CSS, JS, images)
+2. Compresses them with gzip
+3. Uploads to **Google Cloud Storage** (bucket root by default, or custom folders)
+4. You manually update load balancer to point to new version (if using custom paths)
+5. Instant rollback available with versioned deployments
+
+**Works with any framework** that outputs static files:
+- React, Vue, Angular, Svelte
+- Next.js (static export), Nuxt (static)
+- Hugo, Jekyll, 11ty
+- Plain HTML/CSS/JS
+
+## How Versioned Deployments Work
+
+### Deployment Options
+
+**Option 1: Bucket Root (Default - Simplest)**
+
+Files deploy directly to bucket root. Perfect for single-app deployments:
+```
+gs://your-bucket/
+├── index.html
+├── assets/
+├── js/
+└── css/
+```
+
+**Option 2: Custom Folder Paths (Versioned)**
+
+Deploy to specific folders for multiple versions or apps:
+
+```
+gs://your-bucket/releases/
+├── v1.0.0/           ← Current production
+├── v1.0.1/           ← Newer version
+├── v0.9.5/           ← Old version (kept for rollback)
+└── v2.0.0-rc1/       ← Staging version
+```
+
+Each version is a complete, independent copy of your app.
+
+### Load Balancer Routing (For Custom Paths)
+
+> **Note:** This section applies to deployments using custom folder paths. If deploying to bucket root, you can skip the path rewrite configuration.
+
+When using custom paths, your **Google Cloud Load Balancer** uses **path rewrite** to route traffic to the correct version:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  User Request                                           │
+│  https://yourapp.com/index.html                         │
+└────────────────────┬────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────┐
+│  Google External Load Balancer                          │
+│  - Backend: GCS Bucket                                  │
+│  - Path Rewrite: /releases/v1.0.0                       │
+└────────────────────┬────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────────────┐
+│  Actual File Served                                     │
+│  gs://your-bucket/releases/v1.0.0/index.html            │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Deployment flow:**
+1. Deploy new version → Script creates `v1.0.1/` folder in bucket
+2. **Manually** update load balancer path rewrite in GCP Console → Change `/releases/v1.0.0` to `/releases/v1.0.1`
+3. Traffic now serves from new version instantly
+
+**Rollback flow:**
+1. **Manually** change load balancer path rewrite back in GCP Console → `/releases/v1.0.0`
+2. Done! No file copying needed, old files are still in bucket.
 
 ## Quick Start
 
-**1. Build your application:**
+### 1. Install Prerequisites
+
 ```bash
-npm run build       # or yarn build, pnpm build, etc.
+# Install Google Cloud SDK
+# https://cloud.google.com/sdk/docs/install
+
+# Authenticate
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
 ```
 
-**2. Deploy:**
+### 2. Setup Environment Files
+
 ```bash
-./scripts/gcp/deploy-staging.sh
+# Copy example files
+cp .env.example .env.staging
+cp .env.example .env.production
+
+# Edit with your settings
+nano .env.production
 ```
 
-The script will prompt for any missing configuration. That's it!
+**Required settings in `.env.production`:**
+```bash
+DEPLOY_PROJECT_ID=your-gcp-project-id
+DEPLOY_BUCKET_NAME=your-app-production
+DEPLOY_VERSION=v1.0.0       # REQUIRED - see versioning below
+```
 
-## Prerequisites
-
-1. **Google Cloud SDK**: Install and authenticate
-   ```bash
-   gcloud auth login
-   gcloud config set project YOUR_PROJECT_ID
-   ```
-
-2. **Build your app**: The deployment script expects pre-built static files
-   ```bash
-   npm run build       # For npm/yarn/pnpm projects
-   hugo                # For Hugo
-   jekyll build        # For Jekyll
-   # etc.
-   ```
-
-3. **Environment Configuration (Optional)**:
-   For automated/CI deployments, create environment files:
-   ```bash
-   cp .env.example .env.production
-   cp .env.example .env.staging
-   ```
-
-3. **Configure Deployment Variables**:
-
-   **In `.env.production`:**
-   ```bash
-   # Required
-   DEPLOY_PROJECT_ID=your-gcp-project-id
-   DEPLOY_BUCKET_NAME=techmanager-app-prod
-
-   # Optional
-   DEPLOY_REGION=us-central1
-   DEPLOY_BUCKET_LOCATION=US
-   DEPLOY_CACHE_MAX_AGE=31536000
-   DEPLOY_HTML_CACHE_MAX_AGE=3600
-   ```
-
-   **In `.env.staging`:**
-   ```bash
-   # Required
-   DEPLOY_PROJECT_ID=your-gcp-project-id-staging
-   DEPLOY_BUCKET_NAME=techmanager-app-staging
-
-   # Optional (shorter cache times for staging)
-   DEPLOY_REGION=us-central1
-   DEPLOY_BUCKET_LOCATION=US
-   DEPLOY_CACHE_MAX_AGE=86400
-   DEPLOY_HTML_CACHE_MAX_AGE=1800
-   ```
-
-## Deployment
-
-### Deploy to Staging
+### 3. Deploy
 
 ```bash
 # Build your app first
 npm run build
 
-# Deploy
-./scripts/gcp/deploy-staging.sh
+# Deploy to staging
+./deploy-staging.sh
+
+# Deploy to production
+./deploy-production.sh
 ```
 
-### Deploy to Production
+## Versioning (REQUIRED)
+
+**You MUST specify a version** for every deployment. No auto-generated timestamps.
+
+### Option 1: Manual Version (Recommended)
+
+Set in your `.env` file:
+```bash
+DEPLOY_VERSION=v1.0.0
+DEPLOY_VERSION=v2.1.3
+DEPLOY_VERSION=v1-0-0-staging
+```
+
+### Option 2: CLI Override
 
 ```bash
-npm run build
-
-# Deploy (requires "yes" confirmation)
-./scripts/gcp/deploy-production.sh
+./deploy-staging.sh --version=v2.0.0
+./deploy-production.sh --version=v1.5.2
 ```
 
-**Production deployment differences:**
-- Longer cache times (1 year for assets, 1 hour for HTML)
-- Requires explicit "yes" confirmation
-- Uses `.env.production` instead of `.env.staging`
-
-### Interactive Mode (Recommended for First Time)
-
-When missing configuration, the scripts will interactively prompt for:
-- GCP Project ID
-- GCS Bucket Name
-- Load Balancer Backend (optional)
-
-### Automated Mode (with .env files)
+### Option 3: Git Tag Auto-Detection
 
 ```bash
-# Configure once
-cat > .env.staging <<EOF
-DEPLOY_PROJECT_ID=my-gcp-project-staging
-DEPLOY_BUCKET_NAME=my-app-staging
-DEPLOY_BUILD_DIR=dist
-EOF
+# Create git tag
+git tag v1.0.0
 
-# Deploy automatically (no prompts)
-npm run build
-./scripts/gcp/deploy-staging.sh --skip-prompts
+# Set in .env file
+DEPLOY_VERSION=auto
+
+# Deploy - will use v1.0.0-{git-sha}
+./deploy-production.sh
 ```
 
-### CLI Arguments
+### Version Conflict Protection
+
+If a version already exists, deployment will fail:
+
+```
+[ERROR] Version v1.0.0 already exists in bucket!
+
+Choose a different version name:
+  ./deploy-production.sh --version=v1.0.1
+```
+
+This prevents accidental overwrites and maintains your rollback history.
+
+## Deployment Path Options
+
+**By default, files are deployed to the bucket root** for simplicity. You can customize the deployment path if needed.
+
+### Default: Bucket Root
 
 ```bash
-# Override specific values
-./scripts/gcp/deploy-staging.sh --bucket=my-custom-bucket
+# Default behavior - deploys to gs://bucket/
+./deploy-production.sh --version=v1.0.0
 
-# Deploy different build directory
-./scripts/gcp/deploy-staging.sh --build-dir=build
-
-# For CI/CD (skip prompts, fail if config missing)
-./scripts/gcp/deploy-staging.sh --skip-prompts
-./scripts/gcp/deploy-production.sh --skip-prompts
+# Explicit bucket root in .env
+DEPLOY_RELEASE_PATH=
+# or
+DEPLOY_RELEASE_PATH=.
 ```
 
-## Versioned Deployments
+**⚠️ IMPORTANT: rsync -d behavior**
 
-All deployments use a **versioned release structure** for easy rollbacks:
+When deploying to bucket root, the scripts use `gsutil rsync -d` which **deletes files from the bucket that are not in your build directory**. This ensures your deployment exactly matches your build output.
 
-```
-gs://your-bucket/releases/
-├── 20251108-143022-abc123/  (newest release)
-├── 20251107-120033-def456/  (previous release)
-└── 20251106-094511-ghi789/  (older release)
-```
+- ✅ Keeps deployment clean and consistent
+- ⚠️ Removes any extra files not in your build
+- ⚠️ Not suitable if you have other files/folders in the bucket
 
-Your **load balancer** is configured to serve from a specific release path (e.g., `/releases/20251108-143022-abc123/`). To rollback, simply update the load balancer to point to a different release - **instant, zero-copy rollback!**
+### Custom Folder Paths
 
-## What the scripts do:
-
-1. **Validates Configuration**: Checks for required environment variables
-2. **Enables APIs**: Ensures Storage API is enabled
-3. **Creates Bucket**: Creates GCS bucket if it doesn't exist
-4. **Builds App**: Runs `npm run build` to create production bundle
-5. **Compresses Files**: Gzips all static assets (js, css, html, json, svg)
-6. **Uploads to Versioned Release**: Uploads to `gs://bucket/releases/TIMESTAMP-SHA/` with proper cache headers:
-   - Static assets: Staging 24 hours, Production 1 year cache
-   - HTML files: Staging 30 minutes, Production 1 hour cache
-7. **Updates Load Balancer** (optional): Updates backend bucket to serve new release
-8. **Lists Available Releases**: Shows all releases for easy rollback reference
-
-## Bucket Configuration
-
-The script automatically:
-- Creates the bucket if it doesn't exist
-- Configures it for static website hosting
-- Makes it publicly readable (for versioned releases)
-- Organizes deployments in `releases/` folder with timestamps
-
-## Rollback to Previous Release
-
-### Interactive Rollback
+Deploy to a specific folder within your bucket:
 
 ```bash
-# Interactive mode - script will guide you
-./scripts/gcp/rollback.sh
+# Deploy to gs://bucket/releases/
+./deploy-production.sh --version=v1.0.0 --release-path=releases/
 
-# Will ask for:
-# 1. Environment (staging/production)
-# 2. Shows list of available releases
-# 3. Prompts for version to rollback to
-# 4. Confirms before rolling back
+# Deploy to gs://bucket/app/
+./deploy-production.sh --version=v1.0.0 --release-path=app/
+
+# Set in .env file
+DEPLOY_RELEASE_PATH=frontend/v1/
 ```
 
-### Quick Rollback
+**Benefits of custom paths:**
+- Keep multiple versions in the same bucket
+- Store other files/folders alongside deployments
+- Organize deployments by environment or version
+- No accidental deletion of other bucket contents
+
+**When deploying to custom paths:**
+- Version conflict checking is enabled (prevents overwriting)
+- Other files in bucket are preserved
+- You can have multiple deployment paths in one bucket
+
+### Choosing the Right Option
+
+| Scenario | Recommended Path |
+|----------|------------------|
+| Single app, simple deployment | Bucket root (default) |
+| Multiple versions for rollback | Custom path: `releases/` |
+| Multiple apps in one bucket | Custom paths: `app1/`, `app2/` |
+| Staging + production in same bucket | Custom paths: `staging/`, `production/` |
+| Want to keep other files in bucket | Custom path |
+
+## Deployment Safety Checks
+
+Both scripts have **multiple confirmation gates**:
+
+1. ✅ **Version exists check** - Prevents overwriting existing versions
+2. ✅ **Initial confirmation** - Type `yes` to start deployment
+3. ✅ **Pre-upload summary** - Shows:
+   - GCP account being used
+   - Project ID
+   - Bucket name
+   - Version being deployed
+   - Number of files
+   - Total size
+4. ✅ **Final confirmation** - Type `DEPLOY` to upload
+
+**Example pre-upload summary:**
+```
+============================================
+PRODUCTION DEPLOYMENT - FINAL CHECK
+============================================
+
+GCP Account & Project:
+  Account:       you@example.com
+  Project ID:    my-gcp-project
+  Environment:   PRODUCTION
+
+Deployment Target:
+  Bucket:        gs://my-app-production
+  Release Path:  gs://my-app-production/releases/v1.0.0/
+  Version:       v1.0.0
+
+Source Files:
+  Directory:     /home/user/myapp/dist
+  Files:         247
+  Total Size:    3.2M
+
+Type 'DEPLOY' to confirm upload:
+```
+
+## Load Balancer Setup
+
+### 1. Create Backend Bucket
 
 ```bash
-# List available releases
-./scripts/gcp/rollback.sh list staging
-
-# Rollback to specific release
-./scripts/gcp/rollback.sh 20251107-120033-def456 staging
-
-# Production rollback (requires 'yes' confirmation)
-./scripts/gcp/rollback.sh 20251107-120033-def456 production
-```
-
-**How it works:**
-- Updates load balancer backend to point to the specified release
-- Zero downtime, instant switch (no file copying!)
-- All old releases remain in bucket until manually deleted
-
-## Cache Headers
-
-- **Static Assets** (js, css, images): 1 year cache with `immutable`
-- **HTML Files**: 1 hour cache for faster updates
-
-## Gzip Compression
-
-Files are compressed locally before upload:
-- JavaScript (`.js`)
-- CSS (`.css`)
-- HTML (`.html`)
-- JSON (`.json`)
-- SVG (`.svg`)
-- Text/XML files
-
-All uploads include `Content-Encoding: gzip` header.
-
-## Load Balancer Configuration (URL Map with Path Rewrite)
-
-This is the **recommended setup** for true instant rollback with zero file copying.
-
-### How It Works
-
-Your load balancer uses path rewrite to serve files from versioned folders:
-
-```
-User requests: https://your-app.com/app.js
-  ↓
-Load Balancer rewrites to: /releases/20251108-143022-abc123/app.js
-  ↓
-Serves from: gs://your-bucket/releases/20251108-143022-abc123/app.js
-```
-
-**Rollback = Just change the path rewrite** (instant!)
-
-### Setup Instructions
-
-#### 1. Create Load Balancer with Backend Bucket
-
-```bash
-# Create backend bucket
-gcloud compute backend-buckets create my-app-staging-backend \
-  --gcs-bucket-name=my-app-staging \
+gcloud compute backend-buckets create my-app-backend \
+  --gcs-bucket-name=my-app-production \
   --enable-cdn
-
-# Create URL map with path rewrite
-gcloud compute url-maps create my-app-staging-lb \
-  --default-backend-bucket=my-app-staging-backend
 ```
 
-#### 2. Configure Path Rewrite in GCP Console
+### 2. Create Load Balancer with Path Rewrite
 
-1. Go to [Load Balancing](https://console.cloud.google.com/net-services/loadbalancing/list/loadBalancers)
-2. Click your load balancer → Edit
-3. Click "Host and path rules"
-4. Add or edit route:
-   - **Path**: `/*`
-   - **Backend**: your-backend-bucket
-   - **Advanced route action** → **URL rewrite**
-   - **Path prefix rewrite**: `/releases/20251108-143022-abc123`
-5. Save
+**Option A: GCP Console (Easiest)**
 
-#### 3. Configure in `.env.staging`
+1. Go to: [Load Balancing](https://console.cloud.google.com/net-services/loadbalancing)
+2. Create HTTP(S) Load Balancer
+3. Add Backend → Select your backend bucket
+4. Configure routing:
+   - Path: `/*`
+   - Backend: `my-app-backend`
+   - **Advanced route action → URL rewrite**
+   - **Path prefix rewrite**: `/releases/v1.0.0`
+5. Configure frontend (domain, SSL certificate)
+6. Create
+
+**Option B: gcloud Command**
 
 ```bash
-# Enable showing LB update instructions after deploy
-DEPLOY_URL_MAP_NAME=my-app-staging-lb
-DEPLOY_PATH_MATCHER_NAME=path-matcher-1
+# Create URL map
+gcloud compute url-maps create my-app-lb \
+  --default-backend-bucket=my-app-backend
+
+# You'll need to configure path rewrite via console or YAML
 ```
 
-Now when you deploy, the script will show you the exact commands to update the path rewrite!
+### 3. Activate New Version (After Each Deployment)
 
-### Finding Your URL Map Name
+**The deployment script uploads files but doesn't activate them.** After deployment finishes, manually update the load balancer to activate the new version:
 
-```bash
-# List all URL maps
-gcloud compute url-maps list
-
-# Describe to see path matchers
-gcloud compute url-maps describe YOUR_LB_NAME
-```
-
-The path matcher name is usually `path-matcher-1` by default.
-
-### Manual Update After Deploy
-
-After each deployment, update the path rewrite:
-
-**Option 1: GCP Console** (Easiest)
+**GCP Console:**
 1. Load Balancing → Your LB → Edit
 2. Host and path rules
-3. Update path prefix to: `/releases/NEW_VERSION`
+3. Update **Path prefix rewrite** to: `/releases/v1.0.1`
+4. Save
 
-**Option 2: gcloud Command**
+The deployment script shows you these exact instructions with your version number after each deploy.
+
+## Rollback to Previous Version
+
+Rollback is **manual** via the Load Balancer UI. All versions are kept in the bucket, so you can instantly switch between them.
+
+### How to Rollback
+
+1. **View available versions:**
+   ```bash
+   gsutil ls gs://BUCKET_NAME/releases/
+   ```
+
+2. **Update Load Balancer path rewrite:**
+   - Go to: [Load Balancing](https://console.cloud.google.com/net-services/loadbalancing)
+   - Click your load balancer → Edit
+   - Host and path rules
+   - Update **Path prefix rewrite** to: `/releases/v1.0.0` (your old version)
+   - Save
+
+Rollback is **instant** - just changes routing, no file copying needed. The old version files are already in the bucket.
+
+## CLI Options
+
 ```bash
-# Export config
-gcloud compute url-maps export my-lb --destination=url-map.yaml
-
-# Edit url-map.yaml - change pathPrefixRewrite to /releases/NEW_VERSION
-
-# Import updated config
-gcloud compute url-maps import my-lb --source=url-map.yaml
-```
-
-## CLI Reference
-
-### Deploy Scripts
-
-```bash
-./scripts/gcp/deploy-staging.sh [OPTIONS]
-./scripts/gcp/deploy-production.sh [OPTIONS]
+./deploy-staging.sh [OPTIONS]
+./deploy-production.sh [OPTIONS]
 
 Options:
-  --build-dir=DIR       Build directory to deploy (default: dist)
+  --version=NAME        Version name (e.g., v1.0.0, v2.1.3)
+  --release-path=PATH   Deployment folder path (default: bucket root)
+                        Examples: "releases/", "app/", "frontend/v1/"
+  --build-dir=DIR       Build directory (default: dist)
   --bucket=NAME         GCS bucket name
   --project=ID          GCP project ID
-  --backend=NAME        Backend bucket name (for LB update)
-  --region=REGION       GCP region (default: us-central1)
-  --skip-prompts        Skip interactive prompts, fail if config missing
-  --help                Show help message
+  --skip-prompts        No interactive prompts (for CI/CD)
 
 Examples:
-  # Interactive mode
-  ./scripts/gcp/deploy-staging.sh
-
-  # Angular project
-  ./scripts/gcp/deploy-staging.sh --build-dir=dist/my-app
-
-  # CI/CD deployment
-  ./scripts/gcp/deploy-production.sh --skip-prompts
-
-  # Override bucket
-  ./scripts/gcp/deploy-staging.sh --bucket=my-custom-bucket
+  ./deploy-staging.sh --version=v2.0.0
+  ./deploy-production.sh --version=v1.5.0 --build-dir=build
+  ./deploy-production.sh --version=v1.0.0 --release-path=releases/
+  ./deploy-staging.sh --skip-prompts  # For automation
 ```
 
-### Rollback Script (rollback.sh)
-
-```bash
-./scripts/gcp/rollback.sh [RELEASE_VERSION] [ENV] [OPTIONS]
-
-Options:
-  --project=ID        GCP project ID
-  --bucket=NAME       GCS bucket name
-  --backend=NAME      Backend bucket name
-  --env=ENV           Environment: staging or production
-  --skip-prompts      Skip interactive prompts
-  --help              Show help
-
-Examples:
-  # Interactive mode
-  ./scripts/gcp/rollback.sh
-
-  # List releases
-  ./scripts/gcp/rollback.sh list staging
-
-  # Rollback to specific version
-  ./scripts/gcp/rollback.sh 20251107-120033-def456 staging
-
-  # With CLI options
-  ./scripts/gcp/rollback.sh --bucket=my-app --env=production
-```
-
-## Framework-Specific Examples
+## Framework Examples
 
 ### React (Vite)
-
 ```bash
-# Build
-npm run build              # Outputs to dist/
-
-# Deploy
-./scripts/gcp/deploy-staging.sh
+npm run build                    # → dist/
+./deploy-staging.sh --version=v1.0.0
 ```
 
 ### Angular
-
 ```bash
-# Build
-ng build --configuration production   # Outputs to dist/project-name/
-
-# Deploy
-./scripts/gcp/deploy-production.sh --build-dir=dist/my-app
-```
-
-### Vue (Vite)
-
-```bash
-# Build
-npm run build             # Outputs to dist/
-
-# Deploy
-./scripts/gcp/deploy-staging.sh
+ng build --configuration production   # → dist/project-name/
+./deploy-production.sh --version=v1.0.0 --build-dir=dist/my-app
 ```
 
 ### Next.js (Static Export)
-
 ```bash
-# Build
-npm run build && npm run export   # Outputs to out/
-
-# Deploy
-./scripts/gcp/deploy-staging.sh --build-dir=out
-```
-
-### Svelte/SvelteKit
-
-```bash
-# Build
-npm run build             # Outputs to build/
-
-# Deploy
-./scripts/gcp/deploy-staging.sh --build-dir=build
+next build && next export        # → out/
+./deploy-staging.sh --version=v1.0.0 --build-dir=out
 ```
 
 ### Hugo
+```bash
+hugo                             # → public/
+./deploy-staging.sh --version=v1.0.0 --build-dir=public
+```
+
+## Environment Variables Reference
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DEPLOY_VERSION` | **Yes** | - | Version name (v1.0.0) or "auto" for git tag |
+| `DEPLOY_RELEASE_PATH` | No | `` (bucket root) | Deployment folder path (e.g., "releases/", "app/") |
+| `DEPLOY_PROJECT_ID` | **Yes** | - | GCP Project ID |
+| `DEPLOY_BUCKET_NAME` | **Yes** | - | GCS bucket name |
+| `DEPLOY_BUILD_DIR` | No | `dist` | Build output directory |
+| `DEPLOY_REGION` | No | `us-central1` | GCP region |
+| `DEPLOY_BUCKET_LOCATION` | No | `US` | Multi-region (US, EU, ASIA) |
+| `DEPLOY_CACHE_MAX_AGE` | No | Staging: 86400<br>Prod: 31536000 | Static asset cache (seconds) |
+| `DEPLOY_HTML_CACHE_MAX_AGE` | No | Staging: 1800<br>Prod: 3600 | HTML cache (seconds) |
+| `DEPLOY_GZIP_EXTENSIONS` | No | `js,css,html,json,svg,txt,xml` | Files to compress |
+| `DEPLOY_URL_MAP_NAME` | No | - | Load balancer URL map (for instructions) |
+
+## Git Tag Workflow
+
+If you use git tags for versioning:
 
 ```bash
-# Build
-hugo                      # Outputs to public/
+# Create a release tag
+git tag -a v1.0.0 -m "Release version 1.0.0"
+git push origin v1.0.0
 
-# Deploy
-./scripts/gcp/deploy-staging.sh --build-dir=public
+# Deploy using auto-detect
+# Set in .env: DEPLOY_VERSION=auto
+./deploy-production.sh
+
+# Result: Deploys to releases/v1.0.0-abc123/
 ```
 
-## CI/CD Integration
+Common git tag commands:
+```bash
+git tag v1.0.0              # Create tag
+git tag -l                  # List tags
+git push origin v1.0.0      # Push tag to remote
+git tag -d v1.0.0           # Delete local tag
+```
 
-### GitHub Actions
+## CI/CD Integration (Later)
+
+Once you're ready to automate, use `--skip-prompts`:
 
 ```yaml
-name: Deploy to Staging
-
-on:
-  push:
-    branches: [develop]
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v1
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Deploy to GCS
-        run: ./scripts/gcp/deploy-staging.sh --skip-prompts
-        env:
-          DEPLOY_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-          DEPLOY_BUCKET_NAME: ${{ secrets.GCS_BUCKET_STAGING }}
+# GitHub Actions example
+- name: Deploy to Production
+  run: ./deploy-production.sh --skip-prompts
+  env:
+    DEPLOY_VERSION: v${{ github.run_number }}
+    DEPLOY_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+    DEPLOY_BUCKET_NAME: ${{ secrets.GCS_BUCKET }}
 ```
-
-### GitLab CI
-
-```yaml
-deploy:staging:
-  stage: deploy
-  image: google/cloud-sdk:alpine
-  script:
-    - npm ci
-    - npm run build
-    - ./scripts/gcp/deploy-staging.sh --skip-prompts
-  environment:
-    name: staging
-  only:
-    - develop
-
-deploy:production:
-  stage: deploy
-  image: google/cloud-sdk:alpine
-  script:
-    - npm ci
-    - npm run build
-    - ./scripts/gcp/deploy-production.sh --skip-prompts
-  environment:
-    name: production
-  only:
-    - main
-  when: manual
-```
-
-## Custom Domain Setup
-
-To use a custom domain with your GCS bucket:
-
-1. **Create Load Balancer** in GCP Console
-2. **Add Backend Bucket** pointing to your GCS bucket
-3. **Enable Cloud CDN** on the backend bucket
-4. **Configure DNS** to point to the load balancer IP
-5. **Set up SSL certificate** for HTTPS
 
 ## Troubleshooting
 
-### Build fails
-- Check that `npm install` has been run
-- Verify `package.json` has build script
-- Check build output directory matches `DEPLOY_BUILD_DIR`
+**Error: Version not specified**
+- Add `DEPLOY_VERSION=v1.0.0` to your `.env` file
+- Or use `--version=v1.0.0` flag
 
-### Upload fails
-- Verify GCP authentication: `gcloud auth list`
+**Error: Version already exists**
+- Increment your version: `v1.0.1`
+- Or delete old version: `gsutil -m rm -r gs://bucket/releases/v1.0.0/`
+
+**Error: Build directory not found**
+- Build your app first: `npm run build`
+- Check `DEPLOY_BUILD_DIR` matches your framework's output directory
+
+**Error: Not authenticated with gcloud**
+```bash
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+**Error: Permission denied**
 - Check bucket permissions: `gsutil iam get gs://BUCKET_NAME`
 - Ensure Storage API is enabled
-
-### CDN invalidation fails
-- Verify load balancer name is correct
-- Check that you have permissions for CDN operations
-- CDN invalidation is non-fatal and won't block deployment
-
-## Security Notes
-
-- `.env.production` should NOT be committed to git (add to `.gitignore`)
-- The bucket is configured as publicly readable for static hosting
-- Use Cloud CDN with HTTPS for production
-- Consider using Identity-Aware Proxy (IAP) for internal apps
 
 ## Useful Commands
 
 ```bash
-# List all releases
+# List all versions in bucket
 gsutil ls gs://BUCKET_NAME/releases/
 
-# List files in specific release
-gsutil ls -lh gs://BUCKET_NAME/releases/20251108-143022-abc123/
+# View version details
+gsutil ls -lh gs://BUCKET_NAME/releases/v1.0.0/
 
-# View bucket in console
+# Test a specific version directly
+curl https://storage.googleapis.com/BUCKET_NAME/releases/v1.0.0/index.html
+
+# Download version for backup
+gsutil -m cp -r gs://BUCKET_NAME/releases/v1.0.0/ ./backup/
+
+# Delete old version
+gsutil -m rm -r gs://BUCKET_NAME/releases/v0.9.0/
+
+# View in GCP Console
 https://console.cloud.google.com/storage/browser/BUCKET_NAME
-
-# Download specific release
-gsutil -m cp -r gs://BUCKET_NAME/releases/20251108-143022-abc123/ ./backup
-
-# Delete old release
-gsutil -m rm -r gs://BUCKET_NAME/releases/20251106-094511-ghi789/
-
-# Test specific release directly
-curl https://storage.googleapis.com/BUCKET_NAME/releases/VERSION/index.html
-
-# Set CORS policy (if needed for APIs)
-gsutil cors set cors.json gs://BUCKET_NAME
 ```
 
-## Release Management
+## Security Notes
 
-### Viewing Releases
+- `.env.production` and `.env.staging` should be in `.gitignore`
+- Buckets are configured as publicly readable (for static hosting)
+- Use HTTPS with valid SSL certificate via Load Balancer
+- Enable Cloud CDN for better performance and DDoS protection
+- Consider Cloud Armor for additional security rules
 
-Each deployment creates a timestamped release folder. To see what's deployed:
+## When to Move to Full CI/CD
 
-```bash
-# List all releases with sizes
-gsutil du -sh gs://BUCKET_NAME/releases/*
+Consider setting up proper CI/CD when you:
+- Deploy multiple times per day
+- Have multiple team members deploying
+- Need automated testing before deployment
+- Want automated rollback on errors
+- Need deployment approvals and audit logs
 
-# See release details
-gsutil ls -lh gs://BUCKET_NAME/releases/20251108-143022-abc123/
-```
+Good next steps:
+- **Cloud Build** - Native GCP build automation
+- **GitHub Actions / GitLab CI** - Repository-integrated pipelines
+- **Terraform** - Infrastructure as Code for load balancer config
+- **Cloud Deploy** - GCP's deployment automation service
 
-### Cleaning Up Old Releases
-
-Releases are kept indefinitely for easy rollback. Clean up manually when needed:
-
-```bash
-# Delete releases older than 30 days (adjust as needed)
-gsutil ls gs://BUCKET_NAME/releases/ | head -n -5 | xargs -I {} gsutil -m rm -r {}
-
-# Or delete specific release
-gsutil -m rm -r gs://BUCKET_NAME/releases/20251106-094511-ghi789/
-```
+This toolkit helps you **learn the patterns** before automating them!

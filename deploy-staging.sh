@@ -17,6 +17,8 @@
 #
 # Options:
 #   --version=NAME        Version name (e.g., v1.0.0, v2.0.0)
+#   --release-path=PATH   Deployment folder path (default: bucket root)
+#                         Examples: "releases/", "app/", "frontend/v1/"
 #   --build-dir=DIR       Build directory to deploy (default: dist)
 #   --bucket=NAME         GCS bucket name
 #   --project=ID          GCP project ID
@@ -26,10 +28,15 @@
 #   --help                Show this help message
 #
 # Examples:
-#   ./scripts/gcp/deploy-staging.sh
-#   ./scripts/gcp/deploy-staging.sh --version=v2.0.0
-#   ./scripts/gcp/deploy-staging.sh --version=v1-5-0 --build-dir=build
-#   ./scripts/gcp/deploy-staging.sh --bucket=my-app-staging
+#   ./scripts/gcp/deploy-staging.sh --version=v1.0.0
+#     # Deploys to bucket root (default)
+#
+#   ./scripts/gcp/deploy-staging.sh --version=v2.0.0 --release-path=releases/
+#     # Deploys to gs://bucket/releases/
+#
+#   ./scripts/gcp/deploy-staging.sh --version=v1.0.0 --release-path=app/
+#     # Deploys to gs://bucket/app/
+#
 #   ./scripts/gcp/deploy-staging.sh --skip-prompts  # For CI/CD
 # ============================================================================
 
@@ -231,6 +238,7 @@ CLI_BACKEND_NAME=""
 CLI_BUILD_DIR=""
 CLI_REGION=""
 CLI_VERSION=""
+CLI_RELEASE_PATH=""
 SKIP_PROMPTS=false
 
 # Parse arguments
@@ -238,6 +246,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --version=*)
             CLI_VERSION="${1#*=}"
+            shift
+            ;;
+        --release-path=*)
+            CLI_RELEASE_PATH="${1#*=}"
             shift
             ;;
         --project=*)
@@ -340,6 +352,7 @@ ENV_REGION=$(get_env_value "DEPLOY_REGION" "$ENV_FILE" "us-central1")
 ENV_BUCKET_LOCATION=$(get_env_value "DEPLOY_BUCKET_LOCATION" "$ENV_FILE" "US")
 ENV_BUILD_DIR=$(get_env_value "DEPLOY_BUILD_DIR" "$ENV_FILE" "dist")
 ENV_VERSION=$(get_env_value "DEPLOY_VERSION" "$ENV_FILE")
+ENV_RELEASE_PATH=$(get_env_value "DEPLOY_RELEASE_PATH" "$ENV_FILE")
 ENV_BACKEND_BUCKET_NAME=$(get_env_value "DEPLOY_BACKEND_BUCKET_NAME" "$ENV_FILE")
 ENV_ENABLE_LB_UPDATE=$(get_env_value "DEPLOY_ENABLE_LB_UPDATE" "$ENV_FILE" "false")
 ENV_URL_MAP_NAME=$(get_env_value "DEPLOY_URL_MAP_NAME" "$ENV_FILE")
@@ -356,6 +369,7 @@ BUCKET_NAME="${CLI_BUCKET_NAME:-$ENV_BUCKET_NAME}"
 REGION="${CLI_REGION:-$ENV_REGION}"
 BUILD_DIR="${CLI_BUILD_DIR:-$ENV_BUILD_DIR}"
 DEPLOY_VERSION="${CLI_VERSION:-$ENV_VERSION}"
+DEPLOY_RELEASE_PATH="${CLI_RELEASE_PATH:-$ENV_RELEASE_PATH}"
 BACKEND_BUCKET_NAME="${CLI_BACKEND_NAME:-$ENV_BACKEND_BUCKET_NAME}"
 BUCKET_LOCATION="$ENV_BUCKET_LOCATION"
 CACHE_MAX_AGE="$ENV_CACHE_MAX_AGE"
@@ -516,33 +530,57 @@ else
 fi
 
 # ============================================================================
+# Determine Release Path
+# ============================================================================
+
+# Construct the full release path based on configuration
+if [ -z "$DEPLOY_RELEASE_PATH" ]; then
+    # Default: bucket root (no subfolder)
+    RELEASE_FULL_PATH=""
+elif [ "$DEPLOY_RELEASE_PATH" = "." ] || [ "$DEPLOY_RELEASE_PATH" = "/" ] || [ "$DEPLOY_RELEASE_PATH" = "root" ]; then
+    # Explicitly deploy to bucket root
+    RELEASE_FULL_PATH=""
+else
+    # Custom path - ensure it ends with /
+    RELEASE_FULL_PATH="${DEPLOY_RELEASE_PATH%/}/"
+fi
+
+# ============================================================================
 # Check if version already exists
 # ============================================================================
 
 check_version_exists() {
     local bucket=$1
-    local version=$2
+    local release_path=$2
 
-    # Check if this version already exists in GCS
-    if gsutil ls "gs://${bucket}/releases/${version}/" >/dev/null 2>&1; then
+    # Skip check if deploying to bucket root (would check entire bucket)
+    if [ -z "$release_path" ]; then
+        log_warn "Deploying to bucket root - skipping version exists check"
+        return 0
+    fi
+
+    # Check if this release path already exists in GCS
+    if gsutil ls "gs://${bucket}/${release_path}" >/dev/null 2>&1; then
         echo ""
-        log_error "Version ${version} already exists in bucket!"
+        log_error "Release path '${release_path}' already exists in bucket!"
         echo ""
-        log_warn "This version has already been deployed. You cannot overwrite existing versions."
+        log_warn "This path has already been deployed. You cannot overwrite existing releases."
         echo ""
-        log_info "Existing files in this version:"
-        gsutil ls "gs://${bucket}/releases/${version}/" | head -10
+        log_info "Existing files at this path:"
+        gsutil ls "gs://${bucket}/${release_path}" | head -10
         echo ""
-        log_info "Choose a different version name:"
-        log_info "  Option 1: Increment version"
+        log_info "Choose a different option:"
+        log_info "  Option 1: Change version"
         log_info "    ${CYAN}./deploy-staging.sh --version=v0.5.6${NC}"
-        log_info "    ${CYAN}./deploy-staging.sh --version=${version}-patch1${NC}"
         echo ""
-        log_info "  Option 2: Update DEPLOY_VERSION in .env.staging"
-        log_info "    ${CYAN}DEPLOY_VERSION=v0.5.6${NC}"
+        log_info "  Option 2: Change release path"
+        log_info "    ${CYAN}./deploy-staging.sh --release-path=app/v2/${NC}"
         echo ""
-        log_info "  Option 3: Delete old version first (dangerous!)"
-        log_info "    ${CYAN}gsutil -m rm -r gs://${bucket}/releases/${version}/${NC}"
+        log_info "  Option 3: Update in .env.staging"
+        log_info "    ${CYAN}DEPLOY_VERSION=v0.5.6${NC} or ${CYAN}DEPLOY_RELEASE_PATH=custom/path/${NC}"
+        echo ""
+        log_info "  Option 4: Delete old release first (dangerous!)"
+        log_info "    ${CYAN}gsutil -m rm -r gs://${bucket}/${release_path}${NC}"
         echo ""
         return 1
     fi
@@ -551,11 +589,15 @@ check_version_exists() {
 
 # Only check if bucket name is set (it might not be if prompts are needed)
 if [ -n "$BUCKET_NAME" ]; then
-    log_step "Checking if version already exists..."
-    if ! check_version_exists "$BUCKET_NAME" "$BUILD_TAG"; then
+    log_step "Checking if release path already exists..."
+    if ! check_version_exists "$BUCKET_NAME" "$RELEASE_FULL_PATH"; then
         exit 1
     fi
-    log_success "Version ${BUILD_TAG} is available"
+    if [ -z "$RELEASE_FULL_PATH" ]; then
+        log_success "Deploying to bucket root"
+    else
+        log_success "Release path '${RELEASE_FULL_PATH}' is available"
+    fi
     echo ""
 fi
 
@@ -650,9 +692,13 @@ gzip_files() {
 upload_to_gcs() {
     local dist_dir=$1
     local bucket=$2
-    local version=$3
+    local release_path=$3
 
-    log_info "Uploading files to versioned release: releases/${version}/"
+    if [ -z "$release_path" ]; then
+        log_info "Uploading files to bucket root"
+    else
+        log_info "Uploading files to: ${release_path}"
+    fi
 
     # Count files to upload
     local total_files=$(find "$dist_dir" -type f | wc -l)
@@ -667,7 +713,7 @@ upload_to_gcs() {
     log_info "  Uploading assets..."
     if ! retry_command $MAX_RETRIES gsutil -m rsync -r -d \
         -x ".*\.html$|.*\.html\.gz$" \
-        . "gs://${bucket}/releases/${version}/" 2>&1 | tee /tmp/gsutil-upload.log; then
+        . "gs://${bucket}/${release_path}" 2>&1 | tee /tmp/gsutil-upload.log; then
         log_error "Failed to upload files after $MAX_RETRIES attempts"
         log_error "Check /tmp/gsutil-upload.log for details"
         cd "$PROJECT_ROOT"
@@ -680,7 +726,7 @@ upload_to_gcs() {
         remote_path="${file#./}"
         gsutil -h "Content-Encoding:gzip" \
                -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
-               setmeta "gs://${bucket}/releases/${version}/${remote_path}" 2>/dev/null || true
+               setmeta "gs://${bucket}/${release_path}${remote_path}" 2>/dev/null || true
     done
 
     # Upload HTML files with shorter cache (upload .html.gz as .html)
@@ -693,7 +739,7 @@ upload_to_gcs() {
         gsutil -h "Content-Type:text/html" \
                -h "Content-Encoding:gzip" \
                -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
-               cp "$file" "gs://${bucket}/releases/${version}/${dest}" 2>/dev/null || {
+               cp "$file" "gs://${bucket}/${release_path}${dest}" 2>/dev/null || {
             log_warn "Failed to upload: $file"
         }
         ((html_count++))
@@ -709,9 +755,9 @@ upload_to_gcs() {
 
     # Verify upload
     log_step "Verifying upload..."
-    if retry_command $MAX_RETRIES gsutil ls "gs://${bucket}/releases/${version}/index.html" >/dev/null 2>&1 || \
-       retry_command $MAX_RETRIES gsutil ls "gs://${bucket}/releases/${version}/" | grep -q "."; then
-        log_success "Upload complete to gs://${bucket}/releases/${version}/"
+    if retry_command $MAX_RETRIES gsutil ls "gs://${bucket}/${release_path}index.html" >/dev/null 2>&1 || \
+       retry_command $MAX_RETRIES gsutil ls "gs://${bucket}/${release_path}" | grep -q "."; then
+        log_success "Upload complete to gs://${bucket}/${release_path}"
         return 0
     else
         log_error "Upload verification failed - no files found in release"
@@ -805,8 +851,8 @@ echo ""
 
 # Confirm deployment in interactive mode
 if [ "$SKIP_PROMPTS" = false ]; then
-    read -p "$(echo -e "${CYAN}Proceed with deployment? (Y/n):${NC} ")" confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    read -p "$(echo -e "${CYAN}Type 'yes' to proceed with deployment:${NC} ")" confirm
+    if [ "$confirm" != "yes" ]; then
         log_warn "Deployment cancelled"
         exit 0
     fi
@@ -851,8 +897,55 @@ if ! gzip_files "$BUILD_DIR_PATH" "$GZIP_EXTENSIONS"; then
 fi
 echo ""
 
-# Step 7: Upload to GCS (versioned release)
-if ! upload_to_gcs "$BUILD_DIR_PATH" "$BUCKET_NAME" "$BUILD_TAG"; then
+# Step 6.5: Pre-upload Summary and Confirmation
+log_step "Final pre-upload verification..."
+echo ""
+
+# Get current GCP account
+CURRENT_ACCOUNT=$(gcloud config get-value account 2>/dev/null || echo "unknown")
+
+# Count files and get size
+FILE_COUNT=$(find "$BUILD_DIR_PATH" -type f | wc -l)
+TOTAL_SIZE=$(du -sh "$BUILD_DIR_PATH" 2>/dev/null | awk '{print $1}' || echo "unknown")
+
+log_info "${YELLOW}============================================${NC}"
+log_info "${YELLOW}DEPLOYMENT SUMMARY - FINAL CHECK${NC}"
+log_info "${YELLOW}============================================${NC}"
+echo ""
+log_info "${CYAN}GCP Account & Project:${NC}"
+log_info "  Account:       ${CURRENT_ACCOUNT}"
+log_info "  Project ID:    ${PROJECT_ID}"
+log_info "  Environment:   staging"
+echo ""
+log_info "${CYAN}Deployment Target:${NC}"
+log_info "  Bucket:        gs://${BUCKET_NAME}"
+if [ -z "$RELEASE_FULL_PATH" ]; then
+    log_info "  Release Path:  gs://${BUCKET_NAME}/ (bucket root)"
+else
+    log_info "  Release Path:  gs://${BUCKET_NAME}/${RELEASE_FULL_PATH}"
+fi
+log_info "  Version:       ${BUILD_TAG}"
+echo ""
+log_info "${CYAN}Source Files:${NC}"
+log_info "  Directory:     ${BUILD_DIR_PATH}"
+log_info "  Files:         ${FILE_COUNT}"
+log_info "  Total Size:    ${TOTAL_SIZE}"
+echo ""
+log_warn "About to upload ${FILE_COUNT} files to GCS bucket: ${BUCKET_NAME}"
+echo ""
+
+# Confirmation prompt (unless --skip-prompts)
+if [ "$SKIP_PROMPTS" = false ]; then
+    read -p "$(echo -e "${YELLOW}Type 'DEPLOY' to confirm upload:${NC} ")" confirm_upload
+    if [ "$confirm_upload" != "DEPLOY" ]; then
+        log_warn "Upload cancelled - you must type exactly: DEPLOY"
+        exit 0
+    fi
+    echo ""
+fi
+
+# Step 7: Upload to GCS
+if ! upload_to_gcs "$BUILD_DIR_PATH" "$BUCKET_NAME" "$RELEASE_FULL_PATH"; then
     log_error "Upload failed"
     exit 1
 fi
@@ -874,9 +967,14 @@ echo ""
 # Show deployment details
 log_info "Deployment Details:"
 log_info "  Environment:  staging"
-log_info "  Release:      ${BUILD_TAG}"
-log_info "  GCS Path:     gs://${BUCKET_NAME}/releases/${BUILD_TAG}/"
-log_info "  Direct URL:   https://storage.googleapis.com/${BUCKET_NAME}/releases/${BUILD_TAG}/index.html"
+log_info "  Version:      ${BUILD_TAG}"
+if [ -z "$RELEASE_FULL_PATH" ]; then
+    log_info "  GCS Path:     gs://${BUCKET_NAME}/ (bucket root)"
+    log_info "  Direct URL:   https://storage.googleapis.com/${BUCKET_NAME}/index.html"
+else
+    log_info "  GCS Path:     gs://${BUCKET_NAME}/${RELEASE_FULL_PATH}"
+    log_info "  Direct URL:   https://storage.googleapis.com/${BUCKET_NAME}/${RELEASE_FULL_PATH}index.html"
+fi
 
 if [ -n "$URL_MAP_NAME" ]; then
     log_info "  URL Map:      ${URL_MAP_NAME}"
@@ -884,7 +982,12 @@ fi
 
 echo ""
 log_info "Next Steps:"
-log_info "  Rollback:     ./scripts/gcp/rollback.sh <VERSION> staging"
-log_info "  List:         ./scripts/gcp/rollback.sh list staging"
-log_info "  View:         https://console.cloud.google.com/storage/browser/${BUCKET_NAME}/releases?project=${PROJECT_ID}"
+if [ -z "$RELEASE_FULL_PATH" ]; then
+    log_info "  List files:     gsutil ls gs://${BUCKET_NAME}/"
+    log_info "  View in console: https://console.cloud.google.com/storage/browser/${BUCKET_NAME}?project=${PROJECT_ID}"
+else
+    log_info "  List files:     gsutil ls gs://${BUCKET_NAME}/${RELEASE_FULL_PATH}"
+    log_info "  View in console: https://console.cloud.google.com/storage/browser/${BUCKET_NAME}/${RELEASE_FULL_PATH%/}?project=${PROJECT_ID}"
+fi
+log_info "  Update LB: Manually update load balancer path rewrite in GCP Console"
 echo ""
