@@ -16,6 +16,7 @@
 #   ./scripts/gcp/deploy-staging.sh [OPTIONS]
 #
 # Options:
+#   --version=NAME        Version name (e.g., v1.0.0, v2.0.0)
 #   --build-dir=DIR       Build directory to deploy (default: dist)
 #   --bucket=NAME         GCS bucket name
 #   --project=ID          GCP project ID
@@ -26,7 +27,8 @@
 #
 # Examples:
 #   ./scripts/gcp/deploy-staging.sh
-#   ./scripts/gcp/deploy-staging.sh --build-dir=build
+#   ./scripts/gcp/deploy-staging.sh --version=v2.0.0
+#   ./scripts/gcp/deploy-staging.sh --version=v1-5-0 --build-dir=build
 #   ./scripts/gcp/deploy-staging.sh --bucket=my-app-staging
 #   ./scripts/gcp/deploy-staging.sh --skip-prompts  # For CI/CD
 # ============================================================================
@@ -125,7 +127,7 @@ show_help() {
 
 # Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
 
 # ============================================================================
 # Validation Functions
@@ -228,11 +230,16 @@ CLI_BUCKET_NAME=""
 CLI_BACKEND_NAME=""
 CLI_BUILD_DIR=""
 CLI_REGION=""
+CLI_VERSION=""
 SKIP_PROMPTS=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --version=*)
+            CLI_VERSION="${1#*=}"
+            shift
+            ;;
         --project=*)
             CLI_PROJECT_ID="${1#*=}"
             shift
@@ -332,6 +339,7 @@ ENV_BUCKET_NAME=$(get_env_value "DEPLOY_BUCKET_NAME" "$ENV_FILE")
 ENV_REGION=$(get_env_value "DEPLOY_REGION" "$ENV_FILE" "us-central1")
 ENV_BUCKET_LOCATION=$(get_env_value "DEPLOY_BUCKET_LOCATION" "$ENV_FILE" "US")
 ENV_BUILD_DIR=$(get_env_value "DEPLOY_BUILD_DIR" "$ENV_FILE" "dist")
+ENV_VERSION=$(get_env_value "DEPLOY_VERSION" "$ENV_FILE")
 ENV_BACKEND_BUCKET_NAME=$(get_env_value "DEPLOY_BACKEND_BUCKET_NAME" "$ENV_FILE")
 ENV_ENABLE_LB_UPDATE=$(get_env_value "DEPLOY_ENABLE_LB_UPDATE" "$ENV_FILE" "false")
 ENV_URL_MAP_NAME=$(get_env_value "DEPLOY_URL_MAP_NAME" "$ENV_FILE")
@@ -347,6 +355,7 @@ PROJECT_ID="${CLI_PROJECT_ID:-$ENV_PROJECT_ID}"
 BUCKET_NAME="${CLI_BUCKET_NAME:-$ENV_BUCKET_NAME}"
 REGION="${CLI_REGION:-$ENV_REGION}"
 BUILD_DIR="${CLI_BUILD_DIR:-$ENV_BUILD_DIR}"
+DEPLOY_VERSION="${CLI_VERSION:-$ENV_VERSION}"
 BACKEND_BUCKET_NAME="${CLI_BACKEND_NAME:-$ENV_BACKEND_BUCKET_NAME}"
 BUCKET_LOCATION="$ENV_BUCKET_LOCATION"
 CACHE_MAX_AGE="$ENV_CACHE_MAX_AGE"
@@ -410,6 +419,9 @@ if [ -z "$BACKEND_BUCKET_NAME" ]; then
 fi
 
 # Resolve build directory path
+# Expand tilde if present
+BUILD_DIR="${BUILD_DIR/#\~/$HOME}"
+
 if [[ "$BUILD_DIR" = /* ]]; then
     BUILD_DIR_PATH="$BUILD_DIR"
 else
@@ -419,20 +431,133 @@ fi
 # Validate build directory exists
 if [ ! -d "$BUILD_DIR_PATH" ]; then
     log_error "Build directory not found: ${BUILD_DIR_PATH}"
-    log_error ""
-    log_error "Please build your application first:"
-    log_error "  npm run build        (for npm)"
-    log_error "  yarn build           (for yarn)"
-    log_error "  pnpm build           (for pnpm)"
-    log_error ""
-    log_error "Or specify correct build directory with --build-dir=DIR"
+
+    if [ "$SKIP_PROMPTS" = false ]; then
+        log_info ""
+        log_info "Please enter the path to your build directory:"
+        read -p "$(echo -e "${CYAN}Build directory path:${NC} ")" custom_build_dir
+
+        if [ -z "$custom_build_dir" ]; then
+            log_error "No build directory specified"
+            exit 1
+        fi
+
+        # Resolve custom build directory path
+        # Strip any leading/trailing whitespace
+        custom_build_dir=$(echo "$custom_build_dir" | xargs)
+
+        # Expand tilde and resolve path
+        custom_build_dir="${custom_build_dir/#\~/$HOME}"
+
+        # Check if absolute path (starts with /)
+        if [[ "$custom_build_dir" == /* ]]; then
+            BUILD_DIR_PATH="$custom_build_dir"
+        else
+            BUILD_DIR_PATH="$PROJECT_ROOT/$custom_build_dir"
+        fi
+
+        # Validate the new path
+        if [ ! -d "$BUILD_DIR_PATH" ]; then
+            log_error "Build directory still not found: ${BUILD_DIR_PATH}"
+            exit 1
+        fi
+    else
+        log_error ""
+        log_error "Please build your application first:"
+        log_error "  npm run build        (for npm)"
+        log_error "  yarn build           (for yarn)"
+        log_error "  pnpm build           (for pnpm)"
+        log_error ""
+        log_error "Or specify correct build directory with --build-dir=DIR"
+        exit 1
+    fi
+fi
+
+# Build configuration - Version naming
+# Version is REQUIRED - no fallback versioning
+if [ -z "$DEPLOY_VERSION" ]; then
+    echo ""
+    log_error "Version not specified!"
+    echo ""
+    log_info "You must specify a version using one of these methods:"
+    echo ""
+    log_info "1. Use --version flag:"
+    log_info "   ${CYAN}./deploy-staging.sh --version=v1.0.0${NC}"
+    echo ""
+    log_info "2. Set DEPLOY_VERSION in .env.staging:"
+    log_info "   ${CYAN}DEPLOY_VERSION=v1.0.0${NC}"
+    echo ""
+    log_info "3. Create a git tag and set DEPLOY_VERSION=auto:"
+    log_info "   ${CYAN}git tag v1.0.0${NC}"
+    log_info "   ${CYAN}DEPLOY_VERSION=auto${NC}"
+    echo ""
+    log_info "Version format examples:"
+    log_info "   v1.0.0, v2.1.3, v1-0-0, v2-5-1"
+    echo ""
     exit 1
 fi
 
-# Build configuration
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "local")
-BUILD_TAG="${TIMESTAMP}-${SHORT_SHA}"
+# Handle special "auto" value - use git tag
+if [ "$DEPLOY_VERSION" = "auto" ]; then
+    SHORT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "local")
+    GIT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+    if [ -z "$GIT_TAG" ]; then
+        log_error "DEPLOY_VERSION=auto but no git tags found"
+        log_error "Create a git tag first: git tag v1.0.0"
+        exit 1
+    fi
+
+    BUILD_TAG="${GIT_TAG}-${SHORT_SHA}"
+    log_info "Using auto-detected version from git tag: ${BUILD_TAG}"
+else
+    # Use manually specified version
+    BUILD_TAG="$DEPLOY_VERSION"
+fi
+
+# ============================================================================
+# Check if version already exists
+# ============================================================================
+
+check_version_exists() {
+    local bucket=$1
+    local version=$2
+
+    # Check if this version already exists in GCS
+    if gsutil ls "gs://${bucket}/releases/${version}/" >/dev/null 2>&1; then
+        echo ""
+        log_error "Version ${version} already exists in bucket!"
+        echo ""
+        log_warn "This version has already been deployed. You cannot overwrite existing versions."
+        echo ""
+        log_info "Existing files in this version:"
+        gsutil ls "gs://${bucket}/releases/${version}/" | head -10
+        echo ""
+        log_info "Choose a different version name:"
+        log_info "  Option 1: Increment version"
+        log_info "    ${CYAN}./deploy-staging.sh --version=v0.5.6${NC}"
+        log_info "    ${CYAN}./deploy-staging.sh --version=${version}-patch1${NC}"
+        echo ""
+        log_info "  Option 2: Update DEPLOY_VERSION in .env.staging"
+        log_info "    ${CYAN}DEPLOY_VERSION=v0.5.6${NC}"
+        echo ""
+        log_info "  Option 3: Delete old version first (dangerous!)"
+        log_info "    ${CYAN}gsutil -m rm -r gs://${bucket}/releases/${version}/${NC}"
+        echo ""
+        return 1
+    fi
+    return 0
+}
+
+# Only check if bucket name is set (it might not be if prompts are needed)
+if [ -n "$BUCKET_NAME" ]; then
+    log_step "Checking if version already exists..."
+    if ! check_version_exists "$BUCKET_NAME" "$BUILD_TAG"; then
+        exit 1
+    fi
+    log_success "Version ${BUILD_TAG} is available"
+    echo ""
+fi
 
 # ============================================================================
 # Helper Functions
@@ -517,6 +642,8 @@ gzip_files() {
     if [ $failed -gt 0 ]; then
         log_warn "Failed to compress ${failed} files (continuing anyway)"
     fi
+
+    return 0
 }
 
 # Upload files to GCS with proper headers (versioned releases)
@@ -536,46 +663,46 @@ upload_to_gcs() {
         return 1
     }
 
-    # Upload gzipped files with Content-Encoding header
-    log_info "  Uploading compressed assets..."
-    if ! retry_command $MAX_RETRIES gsutil -m rsync -r \
+    # Upload all files except HTML (HTML handled separately for proper caching)
+    log_info "  Uploading assets..."
+    if ! retry_command $MAX_RETRIES gsutil -m rsync -r -d \
         -x ".*\.html$|.*\.html\.gz$" \
-        -h "Content-Encoding:gzip" \
-        -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
         . "gs://${bucket}/releases/${version}/" 2>&1 | tee /tmp/gsutil-upload.log; then
-        log_error "Failed to upload assets after $MAX_RETRIES attempts"
+        log_error "Failed to upload files after $MAX_RETRIES attempts"
         log_error "Check /tmp/gsutil-upload.log for details"
         cd "$PROJECT_ROOT"
         return 1
     fi
 
-    # Upload HTML files (gzipped) with shorter cache
+    # Set metadata for .gz files (except HTML)
+    log_info "  Setting Content-Encoding for compressed assets..."
+    find . -type f -name "*.gz" ! -name "*.html.gz" | while read -r file; do
+        remote_path="${file#./}"
+        gsutil -h "Content-Encoding:gzip" \
+               -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
+               setmeta "gs://${bucket}/releases/${version}/${remote_path}" 2>/dev/null || true
+    done
+
+    # Upload HTML files with shorter cache (upload .html.gz as .html)
     log_info "  Uploading HTML files..."
-    local html_files=$(find . -name "*.html.gz" -type f | wc -l)
-    if [ "$html_files" -eq 0 ]; then
-        log_warn "No HTML files found to upload"
+    local html_count=0
+    find . -name "*.html.gz" -type f | while read -r file; do
+        dest="${file#./}"
+        dest="${dest%.gz}"  # Remove .gz extension so it's served as .html
+
+        gsutil -h "Content-Type:text/html" \
+               -h "Content-Encoding:gzip" \
+               -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
+               cp "$file" "gs://${bucket}/releases/${version}/${dest}" 2>/dev/null || {
+            log_warn "Failed to upload: $file"
+        }
+        ((html_count++))
+    done
+
+    if [ $html_count -eq 0 ]; then
+        log_warn "No HTML files found"
     else
-        local uploaded=0
-        local failed=0
-
-        find . -name "*.html.gz" -type f | while read -r file; do
-            dest="${file#./}"
-            dest="${dest%.gz}"
-
-            if retry_command $MAX_RETRIES gsutil -h "Content-Type:text/html" \
-                   -h "Content-Encoding:gzip" \
-                   -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
-                   cp "$file" "gs://${bucket}/releases/${version}/${dest}" 2>/dev/null; then
-                ((uploaded++))
-            else
-                log_warn "Failed to upload HTML file: $file"
-                ((failed++))
-            fi
-        done
-
-        if [ $failed -gt 0 ]; then
-            log_warn "Failed to upload ${failed} HTML files"
-        fi
+        log_success "✓ Uploaded $html_count HTML files"
     fi
 
     cd "$PROJECT_ROOT"
@@ -716,7 +843,12 @@ fi
 echo ""
 
 # Step 6: Gzip files
-gzip_files "$BUILD_DIR_PATH" "$GZIP_EXTENSIONS"
+log_info "Build directory: $BUILD_DIR_PATH"
+log_info "Extensions to compress: $GZIP_EXTENSIONS"
+if ! gzip_files "$BUILD_DIR_PATH" "$GZIP_EXTENSIONS"; then
+    log_error "Gzip compression failed"
+    exit 1
+fi
 echo ""
 
 # Step 7: Upload to GCS (versioned release)
