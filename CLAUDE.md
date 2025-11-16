@@ -224,6 +224,7 @@ DEPLOY_PATH_MATCHER_NAME=path-matcher-1
 deploysite-cloudbucket/
 ├── deploy-production.sh      # Production deployment script
 ├── deploy-staging.sh          # Staging deployment script
+├── sync-secrets.sh            # Secret Manager sync & comparison script
 ├── README.md                  # User documentation
 ├── CLAUDE.md                  # This file (Claude Code reference)
 ├── .gitignore                 # Git ignore rules

@@ -494,6 +494,104 @@ gsutil -m rm -r gs://BUCKET_NAME/releases/v0.9.0/
 https://console.cloud.google.com/storage/browser/BUCKET_NAME
 ```
 
+## Secret Management
+
+The toolkit includes `sync-secrets.sh` for managing environment variables in Google Cloud Secret Manager.
+
+### Compare Environment Files
+
+Compare two local `.env` files to see configuration differences:
+
+```bash
+# Compare staging vs production configs
+./sync-secrets.sh compare .env.staging .env.production
+
+# Output shows:
+# - Variables only in file 1 (red)
+# - Variables only in file 2 (green)
+# - Variables with different values (yellow)
+```
+
+### Sync to GCP Secret Manager
+
+Upload environment variables to Google Cloud Secret Manager (with confirmation prompts):
+
+```bash
+# Sync staging environment
+./sync-secrets.sh sync .env.staging my-gcp-project-staging
+
+# Sync production environment
+./sync-secrets.sh sync .env.production my-gcp-project-prod
+```
+
+**What it does:**
+1. Reads your `.env` file
+2. Fetches existing secrets from GCP
+3. Shows what will be created/updated
+4. **Prompts for confirmation** before making changes
+5. Creates new secrets or updates existing ones
+
+**Example output:**
+```
+Sync Plan:
+  Secrets to create: 3
+  Secrets to update: 2
+  Unchanged secrets: 5
+
+Secrets to CREATE:
++ NEW_API_KEY
++ NEW_FEATURE_FLAG
++ DATABASE_URL
+
+Secrets to UPDATE:
+~ DEPLOY_BUCKET_NAME (value changed)
+~ DEPLOY_VERSION (value changed)
+
+This will modify secrets in GCP project: my-gcp-project-staging
+Do you want to continue? (yes/no):
+```
+
+### List Secrets
+
+View all secrets stored in GCP Secret Manager:
+
+```bash
+./sync-secrets.sh list my-gcp-project-staging
+
+# Output shows masked values:
+# DEPLOY_PROJECT_ID = my-gcp-pro...
+# DEPLOY_BUCKET_NAME = my-app-st...
+# API_KEY = sk-1234567...
+```
+
+### Secret Management Best Practices
+
+1. **Use Secret Manager for CI/CD**: Instead of committing `.env` files, store secrets in GCP and fetch during deployment
+2. **Compare before syncing**: Always run `compare` first to understand differences
+3. **Never auto-update production**: The script always prompts to prevent accidents
+4. **Keep .env files in .gitignore**: Never commit environment files to version control
+
+### Accessing Secrets in CI/CD
+
+```bash
+# GitHub Actions example
+- name: Load secrets from GCP
+  run: |
+    gcloud secrets versions access latest --secret="DEPLOY_BUCKET_NAME" > /tmp/.env
+    gcloud secrets versions access latest --secret="DEPLOY_PROJECT_ID" >> /tmp/.env
+    source /tmp/.env
+```
+
+### Required Permissions
+
+To use secret management features, your GCP account needs:
+- `secretmanager.secrets.create` - Create new secrets
+- `secretmanager.secrets.update` - Update existing secrets
+- `secretmanager.versions.add` - Add new secret versions
+- `secretmanager.versions.access` - Read secret values
+
+Or use the predefined role: `roles/secretmanager.admin`
+
 ## Security Notes
 
 - `.env.production` and `.env.staging` should be in `.gitignore`

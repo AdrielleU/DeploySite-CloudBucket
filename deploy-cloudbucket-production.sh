@@ -700,8 +700,8 @@ upload_to_gcs() {
         log_info "Uploading files to: ${release_path}"
     fi
 
-    # Count files to upload
-    local total_files=$(find "$dist_dir" -type f | wc -l)
+    # Count files to upload (exclude .gz files)
+    local total_files=$(find "$dist_dir" -type f ! -name "*.gz" | wc -l)
     log_info "  Found ${total_files} files to upload"
 
     cd "$dist_dir" || {
@@ -709,10 +709,10 @@ upload_to_gcs() {
         return 1
     }
 
-    # Upload all files except HTML (HTML handled separately for proper caching)
-    log_info "  Uploading assets..."
+    # Upload all non-.gz files except HTML (HTML handled separately for proper caching)
+    log_info "  Uploading uncompressed assets..."
     if ! retry_command $MAX_RETRIES gsutil -m rsync -r -d \
-        -x ".*\.html$|.*\.html\.gz$" \
+        -x ".*\.html$|.*\.gz$" \
         . "gs://${bucket}/${release_path}" 2>&1 | tee /tmp/gsutil-upload.log; then
         log_error "Failed to upload files after $MAX_RETRIES attempts"
         log_error "Check /tmp/gsutil-upload.log for details"
@@ -720,36 +720,116 @@ upload_to_gcs() {
         return 1
     fi
 
-    # Set metadata for .gz files (except HTML)
-    log_info "  Setting Content-Encoding for compressed assets..."
-    find . -type f -name "*.gz" ! -name "*.html.gz" | while read -r file; do
+    # Set cache metadata for uploaded assets (non-HTML, non-gzip)
+    log_info "  Setting cache headers for assets..."
+    local asset_count=0
+    while IFS= read -r file; do
         remote_path="${file#./}"
-        gsutil -h "Content-Encoding:gzip" \
-               -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
-               setmeta "gs://${bucket}/${release_path}${remote_path}" 2>/dev/null || true
-    done
+        if gsutil -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
+                   setmeta "gs://${bucket}/${release_path}${remote_path}" >/dev/null 2>&1; then
+            ((asset_count++))
+        fi
+    done < <(find . -type f ! -name "*.html" ! -name "*.gz")
 
-    # Upload HTML files with shorter cache (upload .html.gz as .html)
+    if [ $asset_count -gt 0 ]; then
+        log_success "✓ Set cache headers for ${asset_count} assets"
+    fi
+
+    # Upload gzipped files with Content-Encoding header
+    log_info "  Uploading compressed assets..."
+    local gzip_count=0
+    local gzip_failed=0
+    while IFS= read -r file; do
+        # Remove .gz extension for remote path (browsers will see original filename)
+        local remote_path="${file#./}"
+        local original_name="${remote_path%.gz}"
+
+        # Determine content type based on original extension
+        local content_type="application/octet-stream"
+        case "$original_name" in
+            *.js) content_type="application/javascript" ;;
+            *.css) content_type="text/css" ;;
+            *.json) content_type="application/json" ;;
+            *.svg) content_type="image/svg+xml" ;;
+            *.txt) content_type="text/plain" ;;
+            *.xml) content_type="application/xml" ;;
+        esac
+
+        # Upload with proper headers
+        if gsutil -h "Content-Encoding:gzip" \
+                   -h "Content-Type:${content_type}" \
+                   -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
+                   cp "$file" "gs://${bucket}/${release_path}${original_name}" >/dev/null 2>&1; then
+            ((gzip_count++))
+        else
+            ((gzip_failed++))
+            log_warn "Failed to upload compressed: $file"
+        fi
+    done < <(find . -name "*.gz" -type f ! -name "*.html.gz")
+
+    if [ $gzip_count -gt 0 ]; then
+        log_success "✓ Uploaded ${gzip_count} compressed assets"
+    fi
+
+    if [ $gzip_failed -gt 0 ]; then
+        log_error "Failed to upload $gzip_failed compressed files"
+        cd "$PROJECT_ROOT"
+        return 1
+    fi
+
+    # Upload HTML files with shorter cache
     log_info "  Uploading HTML files..."
     local html_count=0
-    find . -name "*.html.gz" -type f | while read -r file; do
-        dest="${file#./}"
-        dest="${dest%.gz}"  # Remove .gz extension so it's served as .html
+    local html_failed=0
+    while IFS= read -r file; do
+        remote_path="${file#./}"
 
-        gsutil -h "Content-Type:text/html" \
-               -h "Content-Encoding:gzip" \
-               -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
-               cp "$file" "gs://${bucket}/${release_path}${dest}" 2>/dev/null || {
+        if gsutil -h "Content-Type:text/html" \
+                   -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
+                   cp "$file" "gs://${bucket}/${release_path}${remote_path}" >/dev/null 2>&1; then
+            ((html_count++))
+        else
+            ((html_failed++))
             log_warn "Failed to upload: $file"
-        }
-        ((html_count++))
-    done
+        fi
+    done < <(find . -name "*.html" -type f)
 
     if [ $html_count -eq 0 ]; then
-        log_warn "No HTML files found"
+        log_warn "No HTML files uploaded"
     else
         log_success "✓ Uploaded $html_count HTML files"
     fi
+
+    if [ $html_failed -gt 0 ]; then
+        log_error "Failed to upload $html_failed HTML files"
+        cd "$PROJECT_ROOT"
+        return 1
+    fi
+
+    # Upload compressed HTML files
+    log_info "  Uploading compressed HTML files..."
+    local html_gz_count=0
+    while IFS= read -r file; do
+        # Remove .gz extension for remote path
+        local remote_path="${file#./}"
+        local original_name="${remote_path%.gz}"
+
+        if gsutil -h "Content-Encoding:gzip" \
+                   -h "Content-Type:text/html" \
+                   -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
+                   cp "$file" "gs://${bucket}/${release_path}${original_name}" >/dev/null 2>&1; then
+            ((html_gz_count++))
+        fi
+    done < <(find . -name "*.html.gz" -type f)
+
+    if [ $html_gz_count -gt 0 ]; then
+        log_success "✓ Uploaded ${html_gz_count} compressed HTML files"
+    fi
+
+    # Clean up .gz files from build directory
+    log_info "  Cleaning up temporary gzip files..."
+    find . -name "*.gz" -type f -delete 2>/dev/null || true
+    log_success "✓ Cleaned up gzip files"
 
     cd "$PROJECT_ROOT"
 
@@ -888,13 +968,9 @@ if ! check_bucket_access "$BUCKET_NAME"; then
 fi
 echo ""
 
-# Step 6: Gzip files
-log_info "Build directory: $BUILD_DIR_PATH"
-log_info "Extensions to compress: $GZIP_EXTENSIONS"
-if ! gzip_files "$BUILD_DIR_PATH" "$GZIP_EXTENSIONS"; then
-    log_error "Gzip compression failed"
-    exit 1
-fi
+# Step 6: Gzip files for optimal delivery
+log_step "Compressing files..."
+gzip_files "$BUILD_DIR_PATH" "$GZIP_EXTENSIONS"
 echo ""
 
 # Step 6.5: Pre-upload Summary and Confirmation
