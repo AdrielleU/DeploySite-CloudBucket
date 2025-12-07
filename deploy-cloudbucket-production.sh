@@ -667,10 +667,10 @@ gzip_files() {
 
         while IFS= read -r -d '' file; do
             if gzip -9 -k -f "$file" 2>/dev/null; then
-                ((count++))
+                count=$((count + 1))
             else
                 log_warn "Failed to compress: $file"
-                ((failed++))
+                failed=$((failed + 1))
             fi
         done < <(find "$dist_dir" -type f -name "*.${ext}" ! -name "*.gz" -print0)
     done
@@ -727,7 +727,7 @@ upload_to_gcs() {
         remote_path="${file#./}"
         if gsutil -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
                    setmeta "gs://${bucket}/${release_path}${remote_path}" >/dev/null 2>&1; then
-            ((asset_count++))
+            asset_count=$((asset_count + 1))
         fi
     done < <(find . -type f ! -name "*.html" ! -name "*.gz")
 
@@ -760,9 +760,9 @@ upload_to_gcs() {
                    -h "Content-Type:${content_type}" \
                    -h "Cache-Control:public, max-age=${CACHE_MAX_AGE}" \
                    cp "$file" "gs://${bucket}/${release_path}${original_name}" >/dev/null 2>&1; then
-            ((gzip_count++))
+            gzip_count=$((gzip_count + 1))
         else
-            ((gzip_failed++))
+            gzip_failed=$((gzip_failed + 1))
             log_warn "Failed to upload compressed: $file"
         fi
     done < <(find . -name "*.gz" -type f ! -name "*.html.gz")
@@ -787,9 +787,9 @@ upload_to_gcs() {
         if gsutil -h "Content-Type:text/html" \
                    -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
                    cp "$file" "gs://${bucket}/${release_path}${remote_path}" >/dev/null 2>&1; then
-            ((html_count++))
+            html_count=$((html_count + 1))
         else
-            ((html_failed++))
+            html_failed=$((html_failed + 1))
             log_warn "Failed to upload: $file"
         fi
     done < <(find . -name "*.html" -type f)
@@ -818,7 +818,7 @@ upload_to_gcs() {
                    -h "Content-Type:text/html" \
                    -h "Cache-Control:public, max-age=${HTML_CACHE_MAX_AGE}" \
                    cp "$file" "gs://${bucket}/${release_path}${original_name}" >/dev/null 2>&1; then
-            ((html_gz_count++))
+            html_gz_count=$((html_gz_count + 1))
         fi
     done < <(find . -name "*.html.gz" -type f)
 
